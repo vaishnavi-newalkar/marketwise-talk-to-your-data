@@ -1,0 +1,5 @@
+.venv/
+/mw/
+.env
+__pycache__/
+/uploaded_dbs/

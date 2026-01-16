@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+groq
+python-dotenv
+sqlite-utils
+pydantic
+ipykernel
+python-multipart
+streamlit
+requests
