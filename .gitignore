@@ -3,3 +3,4 @@
 .env
 __pycache__/
 /uploaded_dbs/
+chat_history.json

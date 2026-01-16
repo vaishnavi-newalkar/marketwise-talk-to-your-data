@@ -404,7 +404,7 @@ def parse_llm_response(response: str) -> Dict:
 
 
 def clean_sql(sql: str) -> str:
-    """Cleans SQL by removing markdown, code fences, comments, and extra whitespace."""
+    """Cleans SQL by removing markdown, code fences, comments, and extra whitespace/prose."""
     
     if not sql:
         return ""
@@ -420,14 +420,34 @@ def clean_sql(sql: str) -> str:
     # Remove block comments
     sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
     
+    # Find start
+    match = re.search(r'(?i)\b((?:WITH|SELECT)\s+.+)', sql, re.DOTALL)
+    if match:
+        sql = match.group(1)
+    
+    # 1. Truncate at first semicolon
+    if ";" in sql:
+        sql = sql.split(";")[0]
+        
+    # 2. Truncate at common prose indicators (if no semicolon was found or prose followed)
+    # Detects: "Given...", "Note:...", "The query...", "Explanation..."
+    prose_indicators = [
+        r'\n\s*Given\b',
+        r'\n\s*Note\b',
+        r'\n\s*Explanation\b',
+        r'\n\s*The query\b',
+        r'\n\s*This query\b',
+        r'\n\s*Here\b'
+    ]
+    for indicator in prose_indicators:
+        parts = re.split(indicator, sql, flags=re.IGNORECASE)
+        if len(parts) > 1:
+            sql = parts[0]
+    
     # Clean up whitespace
     sql = " ".join(sql.split())
-    sql = sql.strip()
     
-    # Remove trailing semicolon
-    sql = sql.rstrip(";")
-    
-    return sql
+    return sql.strip()
 
 
 # Backward compatibility

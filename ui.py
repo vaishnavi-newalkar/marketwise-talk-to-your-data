@@ -1,27 +1,28 @@
 """
 NL → SQL Chat Assistant - Streamlit UI
 
-A beautiful, ChatGPT-style interface for natural language database queries.
-Features:
-- Modern glassmorphism design with dark theme
-- ChatGPT-style chat bubbles with animations
-- Sidebar for database upload and info
+A beautiful, ChatGPT-style interface with:
+- Modern glassmorphism design
+- Live step-by-step reasoning display
 - Expandable sections for SQL, reasoning, and results
+- Smart suggestions & onboarding
 """
 
 import streamlit as st
 import requests
 import pandas as pd
-from typing import Optional
+import json
+import os
+from datetime import datetime
+from typing import Optional, Dict, List
+import uuid
 
 # -------------------------------------------------
 # Configuration
 # -------------------------------------------------
 API_URL = "http://127.0.0.1:8000"
+CHAT_HISTORY_FILE = "chat_history.json"
 
-# -------------------------------------------------
-# Page Configuration
-# -------------------------------------------------
 st.set_page_config(
     page_title="SQL Assistant",
     page_icon="🧠",
@@ -30,746 +31,570 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# Custom CSS for beautiful UI
+# Chat History Persistence
+# -------------------------------------------------
+def load_chat_history() -> Dict:
+    if os.path.exists(CHAT_HISTORY_FILE):
+        try:
+            with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {"chats": {}, "current_chat_id": None}
+    return {"chats": {}, "current_chat_id": None}
+
+def save_chat_history(data: Dict):
+    try:
+        with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, default=str)
+    except Exception as e:
+        print(f"Failed to save: {e}")
+
+def create_new_chat(db_name: str = None, session_id: str = None, tables: List[str] = None, initial_questions: List[str] = None) -> str:
+    chat_id = str(uuid.uuid4())[:8]
+    history = load_chat_history()
+    history["chats"][chat_id] = {
+        "id": chat_id,
+        "title": "New Chat",
+        "db_name": db_name,
+        "session_id": session_id,
+        "tables": tables or [],
+        "initial_questions": initial_questions or [],
+        "messages": [],
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat()
+    }
+    history["current_chat_id"] = chat_id
+    save_chat_history(history)
+    return chat_id
+
+def update_chat_title(chat_id: str, first_message: str):
+    history = load_chat_history()
+    if chat_id in history["chats"]:
+        title = first_message[:30] + "..." if len(first_message) > 30 else first_message
+        history["chats"][chat_id]["title"] = title
+        save_chat_history(history)
+
+def add_message_to_chat(chat_id: str, role: str, content: str, extra_data: Dict = None):
+    history = load_chat_history()
+    if chat_id in history["chats"]:
+        msg = {"role": role, "content": content, "timestamp": datetime.now().isoformat()}
+        if extra_data: msg["extra_data"] = extra_data
+        history["chats"][chat_id]["messages"].append(msg)
+        history["chats"][chat_id]["updated_at"] = datetime.now().isoformat()
+        
+        # Auto-title on first user message
+        if role == "user" and len([m for m in history["chats"][chat_id]["messages"] if m["role"] == "user"]) == 1:
+            update_chat_title(chat_id, content)
+            
+        save_chat_history(history)
+
+def delete_chat(chat_id: str):
+    history = load_chat_history()
+    if chat_id in history["chats"]:
+        del history["chats"][chat_id]
+        if history["current_chat_id"] == chat_id:
+            msg_ids = list(history["chats"].keys())
+            history["current_chat_id"] = msg_ids[0] if msg_ids else None
+        save_chat_history(history)
+
+def get_current_chat() -> Optional[Dict]:
+    history = load_chat_history()
+    cid = history.get("current_chat_id")
+    return history["chats"].get(cid) if cid else None
+
+def switch_chat(chat_id: str):
+    history = load_chat_history()
+    history["current_chat_id"] = chat_id
+    save_chat_history(history)
+
+def get_all_chats() -> List[Dict]:
+    history = load_chat_history()
+    return sorted(history["chats"].values(), key=lambda x: x.get("updated_at", ""), reverse=True)
+
+
+# -------------------------------------------------
+# UI Components
 # -------------------------------------------------
 def apply_custom_css():
     st.markdown("""
     <style>
-    /* Import Google Fonts */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
     
-    /* Root variables */
-    :root {
-        --bg-primary: #0f0f23;
-        --bg-secondary: #1a1a2e;
-        --bg-tertiary: #16213e;
-        --accent-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        --accent-blue: #667eea;
-        --accent-purple: #764ba2;
-        --accent-pink: #f093fb;
-        --accent-orange: #f5576c;
-        --text-primary: #ffffff;
-        --text-secondary: #a0a0b8;
-        --text-muted: #6b6b80;
-        --border-color: rgba(255, 255, 255, 0.1);
-        --glass-bg: rgba(255, 255, 255, 0.05);
-        --glass-border: rgba(255, 255, 255, 0.1);
-        --user-bubble: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        --assistant-bubble: rgba(255, 255, 255, 0.08);
-        --success-color: #10b981;
-        --error-color: #ef4444;
-        --warning-color: #f59e0b;
+    * {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
-    /* Global styles */
     .stApp {
-        background: linear-gradient(180deg, var(--bg-primary) 0%, var(--bg-secondary) 50%, var(--bg-tertiary) 100%);
-        font-family: 'Inter', sans-serif;
+        background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 25%, #2a1f3e 50%, #1a1f3a 75%, #0a0e27 100%);
+        background-size: 400% 400%;
+        animation: gradientShift 15s ease infinite;
     }
     
-    /* Hide default Streamlit elements */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    @keyframes gradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
     
-    /* Main title styling */
     .main-title {
-        background: var(--accent-gradient);
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         background-clip: text;
         font-size: 2.5rem;
-        font-weight: 700;
+        font-weight: 800;
         text-align: center;
-        margin-bottom: 0.5rem;
-        animation: fadeIn 0.8s ease-out;
-    }
-    
-    .subtitle {
-        color: var(--text-secondary);
-        text-align: center;
-        font-size: 1.1rem;
-        font-weight: 400;
-        margin-bottom: 2rem;
-        animation: fadeIn 1s ease-out;
-    }
-    
-    /* Chat container */
-    .chat-container {
-        max-width: 900px;
-        margin: 0 auto;
-        padding: 1rem;
-    }
-    
-    /* Message bubbles */
-    .message-container {
-        display: flex;
-        margin-bottom: 1.5rem;
-        animation: slideIn 0.3s ease-out;
-    }
-    
-    .message-container.user {
-        justify-content: flex-end;
-    }
-    
-    .message-container.assistant {
-        justify-content: flex-start;
-    }
-    
-    .message-bubble {
-        max-width: 85%;
-        padding: 1rem 1.25rem;
-        border-radius: 1.25rem;
-        font-size: 0.95rem;
-        line-height: 1.6;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-    }
-    
-    .user .message-bubble {
-        background: var(--user-bubble);
-        color: white;
-        border-bottom-right-radius: 0.25rem;
-    }
-    
-    .assistant .message-bubble {
-        background: var(--assistant-bubble);
-        color: var(--text-primary);
-        border-bottom-left-radius: 0.25rem;
-        backdrop-filter: blur(10px);
-        border: 1px solid var(--glass-border);
-    }
-    
-    /* Avatar styling */
-    .avatar {
-        width: 36px;
-        height: 36px;
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.2rem;
-        margin: 0 0.75rem;
-        flex-shrink: 0;
-    }
-    
-    .user .avatar {
-        background: var(--accent-gradient);
-        order: 2;
-    }
-    
-    .assistant .avatar {
-        background: rgba(102, 126, 234, 0.2);
-        border: 1px solid var(--accent-blue);
-    }
-    
-    /* Answer card styling */
-    .answer-card {
-        background: rgba(16, 185, 129, 0.1);
-        border: 1px solid rgba(16, 185, 129, 0.3);
-        border-radius: 1rem;
-        padding: 1.25rem;
+        letter-spacing: -0.5px;
         margin-bottom: 1rem;
+        text-shadow: 0 0 30px rgba(102, 126, 234, 0.3);
     }
     
-    .answer-card h4 {
-        color: var(--success-color);
-        margin: 0 0 0.5rem 0;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-    
-    /* SQL code block styling */
-    .sql-block {
-        background: rgba(0, 0, 0, 0.4);
-        border: 1px solid var(--border-color);
-        border-radius: 0.75rem;
-        padding: 1rem;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 0.85rem;
-        overflow-x: auto;
-        color: #e2e8f0;
-    }
-    
-    /* Reasoning block styling */
-    .reasoning-block {
-        background: rgba(102, 126, 234, 0.1);
-        border: 1px solid rgba(102, 126, 234, 0.3);
-        border-radius: 0.75rem;
-        padding: 1rem;
-        color: var(--text-secondary);
-        font-size: 0.9rem;
-        line-height: 1.7;
-    }
-    
-    /* Sidebar styling */
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, rgba(26, 26, 46, 0.95) 0%, rgba(22, 33, 62, 0.95) 100%);
-        backdrop-filter: blur(20px);
-        border-right: 1px solid var(--border-color);
-    }
-    
-    section[data-testid="stSidebar"] .stMarkdown h1,
-    section[data-testid="stSidebar"] .stMarkdown h2,
-    section[data-testid="stSidebar"] .stMarkdown h3 {
-        color: var(--text-primary);
-    }
-    
-    /* File uploader styling */
-    .stFileUploader > div {
-        background: var(--glass-bg);
-        border: 2px dashed var(--glass-border);
-        border-radius: 1rem;
-        padding: 1.5rem;
-        transition: all 0.3s ease;
-    }
-    
-    .stFileUploader > div:hover {
-        border-color: var(--accent-blue);
-        background: rgba(102, 126, 234, 0.1);
-    }
-    
-    /* Button styling - Updated for Streamlit 1.31+ */
     .stButton > button {
-        background: var(--accent-gradient) !important;
-        color: white !important;
-        border: none !important;
         border-radius: 0.75rem !important;
-        padding: 0.75rem 1.5rem !important;
-        font-weight: 600 !important;
-        font-size: 0.95rem !important;
-        transition: all 0.3s ease !important;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4) !important;
+        font-weight: 500 !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        background: rgba(102, 126, 234, 0.1) !important;
+        backdrop-filter: blur(10px) !important;
     }
     
     .stButton > button:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6) !important;
+        transform: translateY(-2px);
+        box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4) !important;
+        border-color: rgba(102, 126, 234, 0.5) !important;
+        background: rgba(102, 126, 234, 0.2) !important;
     }
     
-    /* Chat input styling */
-    .stChatInput > div {
-        background: var(--glass-bg) !important;
-        border: 1px solid var(--glass-border) !important;
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+        border: none !important;
+        color: white !important;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+    
+    .stButton > button[kind="primary"]:hover {
+        box-shadow: 0 8px 30px rgba(102, 126, 234, 0.6) !important;
+        transform: translateY(-2px) scale(1.02);
+    }
+    
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, rgba(15, 18, 35, 0.95) 0%, rgba(22, 26, 46, 0.95) 100%);
+        border-right: 1px solid rgba(102, 126, 234, 0.2);
+        backdrop-filter: blur(20px);
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.3);
+    }
+    
+    /* Chat message styling */
+    .stChatMessage {
+        background: rgba(255, 255, 255, 0.03) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
         border-radius: 1rem !important;
+        backdrop-filter: blur(10px) !important;
+        margin-bottom: 1rem !important;
+        transition: all 0.3s ease !important;
     }
     
-    .stChatInput textarea {
-        color: var(--text-primary) !important;
-        font-family: 'Inter', sans-serif !important;
+    .stChatMessage:hover {
+        background: rgba(255, 255, 255, 0.05) !important;
+        border-color: rgba(102, 126, 234, 0.3) !important;
+        transform: translateX(4px);
     }
     
     /* Expander styling */
     .streamlit-expanderHeader {
-        background: var(--glass-bg) !important;
-        border: 1px solid var(--glass-border) !important;
-        border-radius: 0.75rem !important;
-        color: var(--text-primary) !important;
-        font-weight: 500 !important;
+        background: rgba(102, 126, 234, 0.1) !important;
+        border: 1px solid rgba(102, 126, 234, 0.2) !important;
+        border-radius: 0.5rem !important;
+        font-weight: 600 !important;
     }
     
-    .streamlit-expanderContent {
-        background: rgba(0, 0, 0, 0.2) !important;
-        border: 1px solid var(--glass-border) !important;
-        border-top: none !important;
-        border-radius: 0 0 0.75rem 0.75rem !important;
+    .streamlit-expanderHeader:hover {
+        background: rgba(102, 126, 234, 0.15) !important;
+        border-color: rgba(102, 126, 234, 0.4) !important;
+    }
+    
+    /* Input styling */
+    .stTextInput > div > div > input,
+    .stChatInput > div > input {
+        background: rgba(255, 255, 255, 0.05) !important;
+        border: 1px solid rgba(102, 126, 234, 0.3) !important;
+        border-radius: 0.75rem !important;
+        color: white !important;
+        font-weight: 400 !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    .stTextInput > div > div > input:focus,
+    .stChatInput > div > input:focus {
+        border-color: rgba(102, 126, 234, 0.6) !important;
+        box-shadow: 0 0 20px rgba(102, 126, 234, 0.3) !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+    }
+    
+    /* Success/Error/Info boxes */
+    .stSuccess, .stError, .stInfo {
+        border-radius: 0.75rem !important;
+        border-left: 4px solid !important;
+        backdrop-filter: blur(10px) !important;
+        animation: slideIn 0.3s ease-out;
+    }
+    
+    @keyframes slideIn {
+        from {
+            opacity: 0;
+            transform: translateX(-10px);
+        }
+        to {
+            opacity: 1;
+            transform: translateX(0);
+        }
+    }
+    
+    /* Code blocks */
+    code {
+        background: rgba(102, 126, 234, 0.1) !important;
+        border: 1px solid rgba(102, 126, 234, 0.2) !important;
+        border-radius: 0.375rem !important;
+        padding: 0.125rem 0.375rem !important;
+        font-family: 'Fira Code', 'Courier New', monospace !important;
     }
     
     /* Dataframe styling */
     .stDataFrame {
-        border-radius: 0.75rem;
-        overflow: hidden;
-    }
-    
-    /* Info/Success/Error boxes */
-    .stAlert {
-        background: var(--glass-bg) !important;
-        border: 1px solid var(--glass-border) !important;
         border-radius: 0.75rem !important;
+        overflow: hidden !important;
+        border: 1px solid rgba(102, 126, 234, 0.2) !important;
     }
     
-    /* Spinner styling */
+    /* Spinner */
     .stSpinner > div {
-        border-color: var(--accent-blue) transparent transparent transparent !important;
+        border-top-color: #667eea !important;
     }
     
-    /* Table list in sidebar */
-    .table-chip {
-        display: inline-block;
-        background: rgba(102, 126, 234, 0.2);
-        border: 1px solid rgba(102, 126, 234, 0.3);
-        color: var(--accent-blue);
-        padding: 0.25rem 0.75rem;
-        border-radius: 2rem;
-        font-size: 0.85rem;
-        margin: 0.25rem;
-        transition: all 0.2s ease;
-    }
-    
-    .table-chip:hover {
-        background: rgba(102, 126, 234, 0.3);
-        transform: translateY(-1px);
-    }
-    
-    /* Animations */
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(-10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-    
-    @keyframes slideIn {
-        from { opacity: 0; transform: translateX(-20px); }
-        to { opacity: 1; transform: translateX(0); }
-    }
-    
-    @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.5; }
-    }
-    
-    .thinking-indicator {
-        display: flex;
-        gap: 0.25rem;
-        padding: 0.5rem;
-    }
-    
-    .thinking-dot {
-        width: 8px;
-        height: 8px;
-        background: var(--accent-blue);
-        border-radius: 50%;
-        animation: pulse 1.5s ease-in-out infinite;
-    }
-    
-    .thinking-dot:nth-child(2) { animation-delay: 0.2s; }
-    .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
-    
-    /* Status badges */
-    .status-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem 1rem;
-        border-radius: 2rem;
-        font-size: 0.85rem;
-        font-weight: 500;
-    }
-    
-    .status-badge.connected {
-        background: rgba(16, 185, 129, 0.2);
-        color: var(--success-color);
-        border: 1px solid rgba(16, 185, 129, 0.3);
-    }
-    
-    .status-badge.disconnected {
-        background: rgba(239, 68, 68, 0.2);
-        color: var(--error-color);
-        border: 1px solid rgba(239, 68, 68, 0.3);
-    }
-    
-    /* Custom scrollbar */
+    /* Scrollbar */
     ::-webkit-scrollbar {
         width: 8px;
         height: 8px;
     }
     
     ::-webkit-scrollbar-track {
-        background: var(--bg-secondary);
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 4px;
     }
     
     ::-webkit-scrollbar-thumb {
-        background: var(--glass-border);
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         border-radius: 4px;
     }
     
     ::-webkit-scrollbar-thumb:hover {
-        background: var(--accent-blue);
+        background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+    }
+    
+    /* Divider */
+    hr {
+        border-color: rgba(102, 126, 234, 0.2) !important;
+        margin: 1.5rem 0 !important;
     }
     </style>
     """, unsafe_allow_html=True)
 
 
-def render_header():
-    """Render the main header."""
-    st.markdown("""
-    <div style="text-align: center; padding: 2rem 0;">
-        <h1 class="main-title">🧠 SQL Assistant</h1>
-        <p class="subtitle">Chat with your database using natural language</p>
-    </div>
-    """, unsafe_allow_html=True)
+def render_reasoning_tree(steps):
+    if not steps: return
+    st.markdown("**System reasoning:**")
+    for i, step in enumerate(steps):
+        icon = step.get("icon", "•")
+        status = step.get("status", "complete")
+        color = "green" if status == "complete" else "red" if status == "error" else "orange" if status == "retry" else "gray"
+        prefix = "└──" if i == len(steps) - 1 else "├──"
+        st.markdown(f"`{prefix}` {icon} :{color}[{step.get('text', '')}]")
 
 
-def render_message(role: str, content: str, extra_data: Optional[dict] = None):
-    """Render a chat message with optional expandable sections."""
+def render_message(role: str, content: str, extra_data: Optional[Dict] = None, message_index: int = 0):
     avatar = "👤" if role == "user" else "🤖"
-    
     with st.chat_message(role, avatar=avatar):
-        st.markdown(content)
-        
-        if extra_data and role == "assistant":
-            # Render expandable sections
-            if extra_data.get("reasoning"):
-                with st.expander("🧠 **Reasoning Process**", expanded=False):
-                    st.markdown(f"""
-                    <div class="reasoning-block">
-                    {extra_data['reasoning']}
-                    </div>
-                    """, unsafe_allow_html=True)
+        if role == "user":
+            st.markdown(content)
+            return
+
+        if extra_data:
+            # Handle Clarification Display
+            if extra_data.get("clarification"):
+                if extra_data.get("reasoning_steps"):
+                    render_reasoning_tree(extra_data["reasoning_steps"])
+                    st.markdown("---")
+                
+                st.warning(f"⚠️ **Clarification Needed**")
+                st.markdown(content)
+                
+                if extra_data.get("options"):
+                    st.markdown("**Suggested options:**")
+                    for opt in extra_data["options"]:
+                        st.markdown(f"• {opt}")
+                return  # Don't proceed with normal rendering
             
-            if extra_data.get("sql"):
-                with st.expander("🔍 **Generated SQL Query**", expanded=False):
-                    st.code(extra_data["sql"], language="sql")
+            if extra_data.get("reasoning_steps"):
+                render_reasoning_tree(extra_data["reasoning_steps"])
+                st.markdown("---")
+            
+            if content:
+                st.success(f"**✅ Answer**\n\n{content}")
+            
+            if extra_data.get("reasoning") or extra_data.get("sql"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    if extra_data.get("reasoning"):
+                        with st.expander("🧠 LLM Reasoning"): st.markdown(extra_data["reasoning"])
+                with c2:
+                    if extra_data.get("sql"):
+                        with st.expander("🔍 Generated SQL"): st.code(extra_data["sql"], language="sql")
             
             if extra_data.get("rows") and extra_data.get("columns"):
-                with st.expander(f"📊 **Result Preview** ({extra_data.get('row_count', len(extra_data['rows']))} rows)", expanded=True):
+                rc = extra_data.get('row_count', len(extra_data['rows']))
+                with st.expander(f"📊 Result Data ({rc} rows)", expanded=True):
                     df = pd.DataFrame(extra_data["rows"], columns=extra_data["columns"])
-                    st.dataframe(
-                        df,
-                        use_container_width=True,
-                        hide_index=True,
-                        height=min(400, len(df) * 38 + 40)
-                    )
-                    
-                    if extra_data.get("truncated"):
-                        st.warning("⚠️ Results were truncated. Showing first 1000 rows.")
+                    st.dataframe(df, use_container_width=True, hide_index=True)
             
+            if extra_data.get("suggestions"):
+                st.markdown("**✨ Suggested Follow-ups:**")
+                cols = st.columns(len(extra_data["suggestions"]))
+                for idx, sugg in enumerate(extra_data["suggestions"]):
+                    with cols[idx]:
+                        # Use message_index for unique key
+                        if st.button(sugg, key=f"sugg_{message_index}_{idx}"):
+                            # Set input and rerun logic handled in main loop
+                            st.session_state.clicked_suggestion = sugg
+                            st.rerun()
+
             if extra_data.get("error"):
                 st.error(f"⚠️ **Error:** {extra_data['error']}")
+                
+                # Show retry attempts if available
+                if extra_data.get("attempts"):
+                    with st.expander("🔍 View Retry Attempts"):
+                        for i, attempt in enumerate(extra_data["attempts"], 1):
+                            st.markdown(f"**Attempt {i}:**")
+                            st.code(attempt.get("sql", ""), language="sql")
+                            st.caption(f"Error: {attempt.get('error', 'Unknown')}")
+                            st.divider()
+        else:
+            st.markdown(content)
 
 
 def check_api_health() -> bool:
-    """Check if the API is reachable."""
     try:
-        res = requests.get(f"{API_URL}/health", timeout=2)
-        return res.status_code == 200
-    except:
-        return False
+        return requests.get(f"{API_URL}/health", timeout=2).status_code == 200
+    except: return False
 
-
-def upload_database(file) -> Optional[dict]:
-    """Upload database to the API."""
+def upload_database(file) -> Optional[Dict]:
     try:
         files = {"file": (file.name, file.getvalue(), "application/octet-stream")}
-        res = requests.post(f"{API_URL}/upload-db", files=files, timeout=30)
-        if res.status_code == 200:
-            return res.json()
-        else:
-            error = res.json().get("detail", "Upload failed")
-            st.error(f"❌ {error}")
-            return None
-    except requests.exceptions.ConnectionError:
-        st.error("❌ Cannot connect to the API server. Please ensure it's running.")
-        return None
-    except Exception as e:
-        st.error(f"❌ Upload error: {str(e)}")
-        return None
+        res = requests.post(f"{API_URL}/upload-db", files=files, timeout=60)
+        return res.json() if res.status_code == 200 else None
+    except: return None
 
-
-def send_question(session_id: str, question: str, is_clarification: bool = False) -> Optional[dict]:
-    """Send a question to the API."""
+def send_question(session_id: str, question: str, is_clarification: bool = False) -> Optional[Dict]:
     try:
-        payload = {
-            "session_id": session_id,
-            "question": question,
-            "is_clarification": is_clarification
-        }
-        res = requests.post(f"{API_URL}/ask", json=payload, timeout=60)
-        
-        if res.status_code == 200:
-            return res.json()
-        elif res.status_code == 404:
-            st.error("❌ Session expired. Please upload the database again.")
-            return None
-        else:
-            error = res.json().get("detail", "Request failed")
-            return {"error": error, "answer": f"Error: {error}"}
-    except requests.exceptions.ConnectionError:
-        st.error("❌ Lost connection to the API server.")
-        return None
-    except requests.exceptions.Timeout:
-        st.error("❌ Request timed out. The query may be too complex.")
-        return None
-    except Exception as e:
-        return {"error": str(e), "answer": f"Error: {str(e)}"}
+        payload = {"session_id": session_id, "question": question, "is_clarification": is_clarification}
+        res = requests.post(f"{API_URL}/ask", json=payload, timeout=120)
+        return res.json() if res.status_code == 200 else None
+    except: return None
 
-
-def render_sidebar():
-    """Render the sidebar with database upload and info."""
-    with st.sidebar:
-        st.markdown("## 📂 Database")
-        
-        # API Status
-        api_healthy = check_api_health()
-        if api_healthy:
-            st.markdown("""
-            <div class="status-badge connected">
-                <span>●</span> API Connected
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div class="status-badge disconnected">
-                <span>●</span> API Disconnected
-            </div>
-            """, unsafe_allow_html=True)
-            st.warning("Start the API server with:\n`uvicorn api:app --reload`")
-        
-        st.markdown("---")
-        
-        # File uploader
-        uploaded_file = st.file_uploader(
-            "Upload SQLite Database",
-            type=["db", "sqlite", "sqlite3"],
-            help="Upload a SQLite database file to start chatting"
-        )
-        
-        if uploaded_file:
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("📤 Upload", use_container_width=True):
-                    with st.spinner("Processing database..."):
-                        result = upload_database(uploaded_file)
-                        if result:
-                            st.session_state.session_id = result["session_id"]
-                            st.session_state.tables = result["tables"]
-                            st.session_state.messages = []
-                            st.session_state.waiting_for_clarification = False
-                            st.success(f"✅ Database loaded! ({result['table_count']} tables)")
-                            st.rerun()
-        
-        # Show current database info
-        if st.session_state.get("tables"):
-            st.markdown("---")
-            st.markdown("### 📋 Tables")
-            
-            # Render table chips
-            table_html = "".join([
-                f'<span class="table-chip">{table}</span>' 
-                for table in st.session_state.tables
-            ])
-            st.markdown(f'<div style="margin-top: 0.5rem;">{table_html}</div>', unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            # Reset button
-            if st.button("🔄 Reset Chat", use_container_width=True):
-                st.session_state.messages = []
-                st.session_state.waiting_for_clarification = False
-                st.rerun()
-            
-            if st.button("🗑️ Clear Session", use_container_width=True):
-                # Clear everything
-                for key in ["session_id", "tables", "messages", "waiting_for_clarification"]:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.rerun()
-        
-        st.markdown("---")
-        st.markdown("""
-        <div style="color: var(--text-muted); font-size: 0.8rem; padding: 1rem 0;">
-            <p><strong>Tips:</strong></p>
-            <ul style="padding-left: 1.2rem; margin: 0.5rem 0;">
-                <li>Ask questions in plain English</li>
-                <li>Reference table and column names</li>
-                <li>Be specific about what you want</li>
-                <li>Use "top 5", "highest", "average" etc.</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
+def get_schema(session_id: str) -> Optional[Dict]:
+    """Fetch the database schema from the API."""
+    try:
+        res = requests.get(f"{API_URL}/schema/{session_id}", timeout=10)
+        return res.json() if res.status_code == 200 else None
+    except: return None
 
 
 def main():
-    """Main application entry point."""
-    
-    # Apply CSS
     apply_custom_css()
     
-    # Initialize session state
-    if "session_id" not in st.session_state:
-        st.session_state.session_id = None
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "tables" not in st.session_state:
-        st.session_state.tables = None
+    # State Init
+    if "current_chat_id" not in st.session_state:
+        st.session_state.current_chat_id = load_chat_history().get("current_chat_id")
+    if "clicked_suggestion" not in st.session_state:
+        st.session_state.clicked_suggestion = None
     if "waiting_for_clarification" not in st.session_state:
         st.session_state.waiting_for_clarification = False
-    
-    # Render components
-    render_sidebar()
-    render_header()
-    
-    # Main chat area
-    if not st.session_state.session_id:
-        # Welcome screen
-        st.markdown("""
-        <div style="
-            text-align: center;
-            padding: 4rem 2rem;
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px dashed rgba(255, 255, 255, 0.1);
-            border-radius: 1.5rem;
-            margin: 2rem auto;
-            max-width: 600px;
-        ">
-            <div style="font-size: 4rem; margin-bottom: 1rem;">📂</div>
-            <h2 style="color: #ffffff; margin-bottom: 0.5rem;">Upload a Database to Start</h2>
-            <p style="color: #a0a0b8; font-size: 1.1rem;">
-                Upload a SQLite database file using the sidebar to begin asking questions
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Feature cards
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("""
-            <div style="
-                background: rgba(102, 126, 234, 0.1);
-                border: 1px solid rgba(102, 126, 234, 0.2);
-                border-radius: 1rem;
-                padding: 1.5rem;
-                text-align: center;
-                height: 100%;
-            ">
-                <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">💬</div>
-                <h3 style="color: #ffffff; margin-bottom: 0.5rem; font-size: 1.1rem;">Natural Language</h3>
-                <p style="color: #a0a0b8; font-size: 0.9rem;">Ask questions in plain English</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div style="
-                background: rgba(118, 75, 162, 0.1);
-                border: 1px solid rgba(118, 75, 162, 0.2);
-                border-radius: 1rem;
-                padding: 1.5rem;
-                text-align: center;
-                height: 100%;
-            ">
-                <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🧠</div>
-                <h3 style="color: #ffffff; margin-bottom: 0.5rem; font-size: 1.1rem;">Smart Reasoning</h3>
-                <p style="color: #a0a0b8; font-size: 0.9rem;">See how queries are generated</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown("""
-            <div style="
-                background: rgba(16, 185, 129, 0.1);
-                border: 1px solid rgba(16, 185, 129, 0.2);
-                border-radius: 1rem;
-                padding: 1.5rem;
-                text-align: center;
-                height: 100%;
-            ">
-                <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">📊</div>
-                <h3 style="color: #ffffff; margin-bottom: 0.5rem; font-size: 1.1rem;">Instant Results</h3>
-                <p style="color: #a0a0b8; font-size: 0.9rem;">View data in beautiful tables</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        return
-    
-    # Chat history
-    for msg in st.session_state.messages:
-        render_message(
-            role=msg["role"],
-            content=msg["content"],
-            extra_data=msg.get("extra_data")
-        )
-    
-    # Chat input
-    placeholder = (
-        "Reply to clarify..." if st.session_state.waiting_for_clarification
-        else "Ask a question about your database..."
-    )
-    
-    if user_input := st.chat_input(placeholder):
-        # Add user message
-        st.session_state.messages.append({
-            "role": "user",
-            "content": user_input
-        })
-        
-        # Display user message
-        render_message("user", user_input)
-        
-        # Get response
-        with st.spinner(""):
-            # Show thinking indicator
-            thinking_placeholder = st.empty()
-            thinking_placeholder.markdown("""
-            <div style="display: flex; align-items: center; gap: 1rem; padding: 1rem;">
-                <div style="
-                    background: rgba(102, 126, 234, 0.2);
-                    border-radius: 50%;
-                    width: 36px;
-                    height: 36px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    font-size: 1.2rem;
-                ">🤖</div>
-                <div class="thinking-indicator">
-                    <div class="thinking-dot"></div>
-                    <div class="thinking-dot"></div>
-                    <div class="thinking-dot"></div>
-                </div>
-                <span style="color: #a0a0b8; font-size: 0.9rem;">Thinking...</span>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            result = send_question(
-                st.session_state.session_id,
-                user_input,
-                st.session_state.waiting_for_clarification
-            )
-            
-            thinking_placeholder.empty()
-        
-        if not result:
-            st.rerun()
-            return
-        
-        # Handle clarification
-        if result.get("clarification"):
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": result["clarification"],
-                "extra_data": {
-                    "term": result.get("term"),
-                    "options": result.get("options")
-                }
-            })
-            st.session_state.waiting_for_clarification = True
-            st.rerun()
-            return
-        
-        # Normal answer
-        st.session_state.waiting_for_clarification = False
-        
-        answer = result.get("answer", "I couldn't process that query.")
-        extra_data = {
-            "reasoning": result.get("reasoning"),
-            "sql": result.get("sql"),
-            "columns": result.get("columns"),
-            "rows": result.get("rows"),
-            "row_count": result.get("row_count"),
-            "truncated": result.get("truncated"),
-            "error": result.get("error")
-        }
-        
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": answer,
-            "extra_data": extra_data
-        })
-        
-        st.rerun()
 
+    # Sidebar
+    with st.sidebar:
+        if st.button("➕ New Chat", use_container_width=True, type="primary"):
+            st.session_state.current_chat_id = create_new_chat()
+            st.session_state.clicked_suggestion = None
+            st.rerun()
+        
+        st.divider()
+        st.subheader("💬 History")
+        
+        chats = get_all_chats()
+        current_id = st.session_state.current_chat_id
+        
+        for chat in chats:
+            c1, c2 = st.columns([5, 1])
+            is_active = chat["id"] == current_id
+            title = chat.get("title", "New Chat")
+            
+            if c1.button(f"{'📌' if is_active else '💬'} {title[:20]}...", key=chat["id"], use_container_width=True):
+                switch_chat(chat["id"])
+                st.session_state.current_chat_id = chat["id"]
+                st.rerun()
+            
+            if c2.button("🗑️", key=f"del_{chat['id']}"):
+                delete_chat(chat["id"])
+                st.rerun()
+
+        st.divider()
+        st.subheader("📂 Database")
+        
+        # API Status with real-time check
+        api_status = check_api_health()
+        if api_status:
+            st.success("✅ API Connected", icon="🟢")
+        else:
+            st.error("❌ API Disconnected", icon="🔴")
+            st.caption("⚠️ Please start the API server:\n```bash\nuvicorn api:app --reload\n```")
+        
+        uploaded_file = st.file_uploader("Upload SQLite", type=["db", "sqlite"])
+        if uploaded_file and st.button("📤 Upload", use_container_width=True):
+            with st.spinner("Analyzing schema..."):
+                res = upload_database(uploaded_file)
+                if res:
+                    history = load_chat_history()
+                    cid = st.session_state.current_chat_id
+                    
+                    if not cid or cid not in history["chats"]:
+                        cid = create_new_chat(uploaded_file.name, res["session_id"], res["tables"], res.get("initial_questions"))
+                        st.session_state.current_chat_id = cid
+                    else:
+                        history["chats"][cid].update({
+                            "db_name": uploaded_file.name,
+                            "session_id": res["session_id"],
+                            "tables": res["tables"],
+                            "initial_questions": res.get("initial_questions", [])
+                        })
+                        save_chat_history(history)
+                    
+                    st.success("✅ Database linked!")
+                    st.rerun()
+        
+        # Display schema if database is loaded
+        current_chat = get_current_chat()
+        if current_chat and current_chat.get("session_id"):
+            st.divider()
+            st.subheader("📊 Database Schema")
+            
+            # Fetch schema from API
+            schema_data = get_schema(current_chat["session_id"])
+            if schema_data and schema_data.get("schema"):
+                schema = schema_data["schema"]
+                
+                # Display database name
+                db_name = current_chat.get("db_name", "Unknown")
+                st.caption(f"**Database:** {db_name}")
+                st.caption(f"**Tables:** {len(schema)}")
+                
+                # Display each table with its columns
+                for table_name, table_info in schema.items():
+                    with st.expander(f"📋 {table_name}", expanded=False):
+                        columns = table_info.get("columns", [])
+                        column_types = table_info.get("column_types", {})
+                        primary_keys = table_info.get("primary_key", [])
+                        row_count = table_info.get("row_count", 0)
+                        
+                        st.caption(f"**Rows:** {row_count:,}")
+                        st.markdown("**Columns:**")
+                        
+                        for col in columns:
+                            col_type = column_types.get(col, "")
+                            pk_marker = " 🔑" if col in primary_keys else ""
+                            st.markdown(f"• `{col}` ({col_type}){pk_marker}")
+                        
+                        # Show foreign keys if any
+                        foreign_keys = table_info.get("foreign_keys", [])
+                        if foreign_keys:
+                            st.markdown("**Foreign Keys:**")
+                            for fk in foreign_keys:
+                                st.markdown(f"• {fk['from']} → {fk['to_table']}.{fk['to_column']}")
+            else:
+                st.info("Schema not available")
+
+    # Main Area
+    st.markdown("<h1 class='main-title'>🧠 SQL Assistant</h1>", unsafe_allow_html=True)
+    
+    current_chat = get_current_chat()
+    if not current_chat or not current_chat.get("session_id"):
+        st.info("👈 Upload a database to get started!", icon="📂")
+        return
+
+    # Display History
+    for i, msg in enumerate(current_chat.get("messages", [])):
+        render_message(msg["role"], msg["content"], msg.get("extra_data"), message_index=i)
+
+    # Initial Questions (Onboarding)
+    # Don't show initial questions if a suggestion was just clicked
+    if not current_chat.get("messages") and not st.session_state.get("clicked_suggestion"):
+        suggestions = current_chat.get("initial_questions", [])
+        if suggestions:
+            st.markdown("### 💡 Recommended Starter Questions")
+            cols = st.columns(2)
+            for i, q in enumerate(suggestions):
+                if cols[i % 2].button(f"✨ {q}", key=f"init_{i}", use_container_width=True):
+                    st.session_state.clicked_suggestion = q
+                    st.rerun()
+
+    # Input Handling
+    user_input = st.chat_input("Ask a question...")
+    
+    # Handle clicked suggestion override
+    if st.session_state.clicked_suggestion:
+        user_input = st.session_state.clicked_suggestion
+        st.session_state.clicked_suggestion = None  # Reset immediately
+
+    if user_input:
+        # Add User Message
+        add_message_to_chat(st.session_state.current_chat_id, "user", user_input)
+        with st.chat_message("user", avatar="👤"): st.markdown(user_input)
+
+        # Process Response
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("🔄 Thinking..."):
+                res = send_question(
+                    current_chat["session_id"], 
+                    user_input, 
+                    st.session_state.waiting_for_clarification
+                )
+        
+        if res:
+            # Handle Clarification
+            if res.get("clarification"):
+                clarification_data = {
+                    "clarification": res.get("clarification"),
+                    "term": res.get("term"),
+                    "options": res.get("options", []),
+                    "reasoning_steps": res.get("reasoning_steps", [])
+                }
+                add_message_to_chat(st.session_state.current_chat_id, "assistant", res["clarification"], clarification_data)
+                st.session_state.waiting_for_clarification = True
+                st.rerun()
+            
+            # Save Response
+            extra_data = {
+                "reasoning": res.get("reasoning"),
+                "reasoning_steps": res.get("reasoning_steps"),
+                "sql": res.get("sql"),
+                "columns": res.get("columns"),
+                "rows": res.get("rows"),
+                "suggestions": res.get("suggestions"),  # Save suggestions!
+                "error": res.get("error"),
+                "attempts": res.get("attempts")  # Save retry attempts
+            }
+            add_message_to_chat(st.session_state.current_chat_id, "assistant", res.get("answer"), extra_data)
+            st.session_state.waiting_for_clarification = False
+            st.rerun()
 
 if __name__ == "__main__":
     main()

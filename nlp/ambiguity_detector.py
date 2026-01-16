@@ -45,19 +45,28 @@ AMBIGUOUS_PATTERNS: Dict[str, Dict] = {
     
     # Time ambiguity
     "latest": {
-        "options": ["most recent date", "last inserted record", "newest entry"],
-        "clarification": "When you say 'latest', do you mean {options}?",
-        "category": "time"
+        "options": ["most recent 10 records", "last 7 days", "last 30 days"],
+        "clarification": "When you say 'latest', do you mean:\n• Most recent 10 records?\n• Last 7 days?\n• Last 30 days?",
+        "category": "time",
+        "priority": "high"
     },
     "recent": {
-        "options": ["last 7 days", "last 30 days", "last quarter", "last year"],
-        "clarification": "How recent? ({options})",
-        "category": "time"
+        "options": ["last 7 days", "last 30 days", "most recent 10 orders"],
+        "clarification": "What does 'recent' mean to you?\n• Orders from the last 7 days?\n• Orders from the last 30 days?\n• The most recent 10 orders?",
+        "category": "time",
+        "priority": "high"
     },
     "old": {
-        "options": ["oldest by date", "created longest ago", "first entries"],
-        "clarification": "When you say 'old', do you mean {options}?",
-        "category": "time"
+        "options": ["oldest 10 records", "older than 1 year", "older than 6 months"],
+        "clarification": "When you say 'old', do you mean:\n• Oldest 10 records?\n• Older than 1 year?\n• Older than 6 months?",
+        "category": "time",
+        "priority": "high"
+    },
+    "new": {
+        "options": ["newest 10 records", "last 7 days", "last 30 days"],
+        "clarification": "When you say 'new', do you mean:\n• Newest 10 records?\n• Last 7 days?\n• Last 30 days?",
+        "category": "time",
+        "priority": "high"
     },
     
     # Quantity ambiguity
@@ -170,7 +179,15 @@ def detect_ambiguity(query: str) -> Tuple[bool, Optional[Dict]]:
     if not query:
         return False, None
     
-    query_lower = query.lower()
+    # Extract the actual user question if it's an enriched query
+    # Enriched queries have format: "Conversation context:\n...\n\nCurrent question:\n<actual_question>"
+    actual_query = query
+    if "Current question:" in query:
+        parts = query.split("Current question:")
+        if len(parts) > 1:
+            actual_query = parts[-1].strip()
+    
+    query_lower = actual_query.lower()
     
     # Check if context makes the query clear
     for pattern in CLEAR_CONTEXT_PATTERNS:
@@ -179,35 +196,51 @@ def detect_ambiguity(query: str) -> Tuple[bool, Optional[Dict]]:
             # For now, we'll consider these patterns as clear
             return False, None
     
-    # Check for ambiguous terms
+    # Check for ambiguous terms (prioritize high-priority terms)
+    high_priority_terms = []
+    normal_priority_terms = []
+    
     for term, config in AMBIGUOUS_PATTERNS.items():
         # Word boundary check to avoid partial matches
         pattern = rf'\b{term}\b'
         if re.search(pattern, query_lower):
-            
-            # Skip terms marked as commonly clear
-            if config.get("skip_common"):
-                # Check if additional context exists that makes it clear
-                has_context = any([
-                    f"{term} of" in query_lower,
-                    f"{term} by" in query_lower,
-                    f"{term} for" in query_lower,
-                ])
-                if has_context:
-                    continue
-            
-            options = config["options"]
+            if config.get("priority") == "high":
+                high_priority_terms.append((term, config))
+            else:
+                normal_priority_terms.append((term, config))
+    
+    # Process high-priority terms first
+    all_terms = high_priority_terms + normal_priority_terms
+    
+    for term, config in all_terms:
+        # Skip terms marked as commonly clear
+        if config.get("skip_common"):
+            # Check if additional context exists that makes it clear
+            has_context = any([
+                f"{term} of" in query_lower,
+                f"{term} by" in query_lower,
+                f"{term} for" in query_lower,
+            ])
+            if has_context:
+                continue
+        
+        options = config["options"]
+        
+        # Use the pre-formatted clarification if it doesn't contain {options}
+        clarification_template = config["clarification"]
+        if "{options}" in clarification_template:
             options_str = ", ".join(options)
-            
-            # Format clarification question
-            question = config["clarification"].format(options=options_str)
-            
-            return True, {
-                "term": term,
-                "options": options,
-                "question": question,
-                "category": config.get("category", "general")
-            }
+            question = clarification_template.format(options=options_str)
+        else:
+            # Use the clarification as-is (already formatted with bullet points)
+            question = clarification_template
+        
+        return True, {
+            "term": term,
+            "options": options,
+            "question": question,
+            "category": config.get("category", "general")
+        }
     
     return False, None
 
