@@ -4,3 +4,4 @@
 __pycache__/
 /uploaded_dbs/
 chat_history.json
+*.md

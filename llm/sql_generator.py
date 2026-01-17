@@ -47,12 +47,16 @@ def generate_sql_with_reasoning(
     # Detect query complexity for appropriate prompting
     complexity = detect_query_complexity(question, plan)
     
+    # Infer semantic flag values from schema
+    value_inference_guide = infer_semantic_flag_values(schema, question)
+    
     prompt = _build_prompt(
         schema_text=schema_text,
         plan_text=plan_text,
         question=question,
         complexity=complexity,
-        retry_context=retry_context
+        retry_context=retry_context,
+        value_inference_guide=value_inference_guide
     )
     
     raw_response = llm_client.generate(prompt, temperature=0.1)
@@ -69,7 +73,8 @@ def _build_prompt(
     plan_text: str,
     question: str,
     complexity: str,
-    retry_context: str = ""
+    retry_context: str = "",
+    value_inference_guide: str = ""
 ) -> str:
     """Builds the LLM prompt based on query complexity."""
     
@@ -126,64 +131,141 @@ For this multi-step query:
 IMPORTANT: Avoid the same mistakes. Use a different approach.
 """
 
-    return f"""You are a senior SQL expert and data analyst.
+    return f"""You are a reasoning-first Natural Language to SQL expert.
 
-Your task is to convert natural language questions into optimized SQLite SQL queries.
+Your primary goal is NOT to generate SQL immediately.
+Your goal is to FIRST understand the user's intent and constraints,
+then generate a safe, correct, OPTIMIZED, read-only SQL query.
 
 ═══════════════════════════════════════════════════════════════════
-                         CRITICAL RULES
+                        MANDATORY 5-STEP PIPELINE
+═══════════════════════════════════════════════════════════════════
+
+STEP 1: INTENT CLASSIFICATION (Already done - see QUERY PLAN below)
+Intent Type: {plan_text}
+
+STEP 2: REASONING PLAN (YOU MUST DO THIS FIRST - VISIBLE TO USER)
+Before writing SQL, produce a short reasoning plan that explains:
+- What entity is being queried
+- What constraints must be enforced
+- Whether the condition is existential, universal, or absence-based
+- Which SQL pattern is required
+- Your optimization strategy
+
+STEP 3: SQL GENERATION (OPTIMIZED - BEST VERSION)
+Generate the BEST POSSIBLE query following these rules:
+
+═══════════════════════════════════════════════════════════════════
+                         OPTIMIZATION RULES
+═══════════════════════════════════════════════════════════════════
+
+INTENT-BASED PATTERN SELECTION:
+✅ EXISTENTIAL ("has", "with", "containing"):
+   - Use EXISTS instead of JOIN when only checking existence
+   - EXISTS stops at first match (faster than JOIN)
+   - Example: SELECT c.* FROM Customer c WHERE EXISTS (SELECT 1 FROM Invoice i WHERE i.CustomerId = c.CustomerId)
+
+✅ UNIVERSAL ("only", "every", "all"):
+   - Use NOT EXISTS for anti-joins (most efficient)
+   - Example: Customers who only bought Rock → use NOT EXISTS to exclude other genres
+
+✅ SET_INTERSECTION ("both X and Y"):
+   - Use GROUP BY + HAVING COUNT(DISTINCT ...) = N (single pass)
+   - Avoid multiple subqueries
+   - Example: GROUP BY customer HAVING COUNT(DISTINCT genre) = 2
+
+✅ ABSENCE ("never", "without", "no"):
+   - Use NOT EXISTS or LEFT JOIN + IS NULL  
+   - NOT EXISTS is usually faster
+   - Example: SELECT c.* FROM Customer c WHERE NOT EXISTS (SELECT 1 FROM Invoice i WHERE i.CustomerId = c.CustomerId)
+
+✅ AGGREGATION/RANKING ("top", "most", "average"):
+   - Use ORDER BY + LIMIT (no DISTINCT RANK needed)
+   - Apply LIMIT to cap results
+   - Example: ORDER BY total DESC LIMIT 5
+
+PERFORMANCE OPTIMIZATIONS:
+1. ❌ NEVER use SELECT *
+2. ✅ Select only needed columns by name
+3. ✅ Use EXISTS over IN for subqueries
+4. ✅ Avoid DISTINCT when GROUP BY achieves same result
+5. ✅ Filter on indexed columns (primary keys, foreign keys) in WHERE
+6. ✅ Apply WHERE filters before JOINs when possible
+7. ✅ Use LIMIT for ranking queries
+8. ✅ Use CTEs (WITH clause) for complex multi-step queries (readability)
+
+═══════════════════════════════════════════════════════════════════
+                   SCHEMA-AWARE VALUE INFERENCE
+═══════════════════════════════════════════════════════════════════
+
+When using semantic flags (discontinued, active, status, shipped, etc.):
+
+❌ NEVER hardcode values without schema inspection:
+   - Don't assume: discontinued = '0' or '1'
+   - Don't assume: active = 'Y' or 'N'
+   - Don't assume: status = 'ACTIVE' or 'INACTIVE'
+
+✅ ALWAYS infer from schema inspection:
+   1. Check the column's data type (INTEGER, BOOLEAN, TEXT)
+   2. Infer the representation:
+      - INTEGER → 0 = false/off, 1 = true/on
+      - BOOLEAN → TRUE/FALSE (or 1/0 in SQLite)
+      - TEXT → Status values (inspect schema/context)
+   3. Explain your inference in REASONING
+
+{value_inference_guide}
+
+═══════════════════════════════════════════════════════════════════
+                         CRITICAL SQL RULES
 ═══════════════════════════════════════════════════════════════════
 
 1. OUTPUT FORMAT (MANDATORY):
    You MUST provide your response in EXACTLY this format:
    
    REASONING:
-   <Step-by-step explanation of your approach>
-   <Why you chose specific tables, joins, conditions>
-   <How you handle edge cases>
+   - Entity: What table/entity is being queried
+   - Constraints: What conditions must be satisfied
+   - Value Inference: How semantic flags are represented (if applicable)
+   - Intent Type: EXISTENTIAL | UNIVERSAL | SET_INTERSECTION | ABSENCE | AGGREGATION
+   - SQL Pattern: EXISTS | NOT EXISTS | GROUP BY + HAVING | JOIN | LEFT JOIN + NULL
+   - Optimization: Why this pattern is most efficient
    
    SQL:
-   <Your SQLite query - NO markdown, NO comments>
+   <Your optimized SQLite query - NO markdown, NO comments>
    
    ⚠️ BOTH SECTIONS ARE REQUIRED
 
-2. SQL RULES:
+2. SAFETY RULES:
    - Generate ONLY valid SQLite SQL
    - Use SELECT or WITH...SELECT only
-   - NEVER use INSERT, UPDATE, DELETE, DROP
-   - NO SQL comments or markdown code fences
-   - Use proper table aliases (e.g., c for Customer)
-   - Always qualify column names in JOINs
-   - Use LIMIT for "top N" queries
+   - NEVER use INSERT, UPDATE, DELETE, DROP, ALTER
+   - NO SQL comments (--) or markdown code fences (```)
+   - Handle NULL correctly (IS NULL / IS NOT NULL)
 
-3. COMMON PATTERNS:
-   - "How many X" → SELECT COUNT(*)
-   - "Top N by Y" → ORDER BY Y DESC LIMIT N  
-   - "Total/sum of X" → SELECT SUM(X)
-   - "Average X" → SELECT AVG(X)
-   - "X who did Y and Z" → Use INTERSECT or GROUP BY HAVING
-   - "X who never Y" → LEFT JOIN ... WHERE id IS NULL
-   - "Both X and Y" → INTERSECT or GROUP BY HAVING COUNT(DISTINCT) = 2
+3. READABILITY RULES:
+   - Use meaningful table aliases (c for Customer, i for Invoice)
+   - Qualify all column names in JOINs (c.CustomerId, not CustomerId)
+   - For complex queries, use CTEs (WITH clause) for clarity
 
 {complexity_guide}
 {retry_section}
 ═══════════════════════════════════════════════════════════════════
-                       DATABASE SCHEMA
+                        DATABASE SCHEMA
 ═══════════════════════════════════════════════════════════════════
 {schema_text}
 
 ═══════════════════════════════════════════════════════════════════
-                        QUERY PLAN
+                         QUERY PLAN
 ═══════════════════════════════════════════════════════════════════
 {plan_text}
 
 ═══════════════════════════════════════════════════════════════════
-                      USER QUESTION
+                       USER QUESTION
 ═══════════════════════════════════════════════════════════════════
 {question}
 
 ═══════════════════════════════════════════════════════════════════
-                      YOUR RESPONSE
+                       YOUR RESPONSE
 ═══════════════════════════════════════════════════════════════════
 REASONING:
 """
@@ -242,6 +324,85 @@ def detect_query_complexity(question: str, plan: Dict) -> str:
     return "simple"
 
 
+def infer_semantic_flag_values(schema: Dict, question: str) -> str:
+    """
+    Analyzes schema to infer how semantic flags are represented.
+    Returns guidance text for the LLM on value inference.
+    """
+    
+    # Common semantic flag patterns to look for
+    flag_keywords = {
+        'discontinued': ['discontinued', 'discontinue', 'disc'],
+        'active': ['active', 'is_active', 'isactive'],
+        'status': ['status', 'state'],
+        'shipped': ['shipped', 'is_shipped'],
+        'completed': ['completed', 'complete', 'is_complete'],
+        'enabled': ['enabled', 'is_enabled'],
+        'verified': ['verified', 'is_verified'],
+        'deleted': ['deleted', 'is_deleted'],
+        'archived': ['archived', 'is_archived'],
+        'published': ['published', 'is_published']
+    }
+    
+    # Find relevant flags in schema
+    found_flags = []
+    
+    for table, info in schema.items():
+        columns = info.get("columns", [])
+        column_types = info.get("column_types", {})
+        
+        for col in columns:
+            col_lower = col.lower()
+            col_type = column_types.get(col, "").upper()
+            
+            # Check if this column matches a semantic flag pattern
+            for concept, patterns in flag_keywords.items():
+                if any(pattern in col_lower for pattern in patterns):
+                    # Determine likely representation based on data type
+                    if 'BOOLEAN' in col_type or 'BOOL' in col_type:
+                        inference = f"{col}: BOOLEAN type → Use TRUE/FALSE or 1/0"
+                    elif 'INT' in col_type or 'TINYINT' in col_type or 'SMALLINT' in col_type:
+                        inference = f"{col}: INTEGER type → Likely 0 = false/{concept} off, 1 = true/{concept} on"
+                    elif 'TEXT' in col_type or 'VARCHAR' in col_type or 'CHAR' in col_type:
+                        inference = f"{col}: TEXT type → Check for status values like 'active'/'inactive', 'Y'/'N', etc."
+                    else:
+                        inference = f"{col}: {col_type} → Inspect schema for representation"
+                    
+                    found_flags.append({
+                        'table': table,
+                        'column': col,
+                        'type': col_type,
+                        'concept': concept,
+                        'inference': inference
+                    })
+    
+    if not found_flags:
+        return ""
+    
+    # Build guidance text
+    lines = []
+    lines.append("SCHEMA-AWARE VALUE INFERENCE GUIDANCE:")
+    lines.append("The following semantic flags were detected in the schema:")
+    lines.append("")
+    
+    for flag in found_flags:
+        lines.append(f"  • {flag['table']}.{flag['column']} ({flag['type']}):")
+        if 'INT' in flag['type']:
+            lines.append(f"    → INTEGER flag: Use 0 = not {flag['concept']}, 1 = {flag['concept']}")
+        elif 'BOOL' in flag['type']:
+            lines.append(f"    → BOOLEAN flag: Use TRUE = {flag['concept']}, FALSE = not {flag['concept']}")
+        elif 'TEXT' in flag['type'] or 'VARCHAR' in flag['type'] or 'CHAR' in flag['type']:
+            lines.append(f"    → TEXT flag: Infer status values from context (e.g., 'active'/'inactive')")
+        lines.append("")
+    
+    lines.append("IMPORTANT:")
+    lines.append("  - Do NOT hardcode arbitrary values like '0', '1', 'Y', 'N' without inference")
+    lines.append("  - Explain your value inference in the REASONING section")
+    lines.append("  - Example: \"Since 'discontinued' is INTEGER, I infer: discontinued = 1 means discontinued\"")
+    
+    return "\n".join(lines)
+
+
 def format_schema_for_prompt(schema: Dict) -> str:
     """Formats schema dictionary into a readable string for the LLM."""
     
@@ -283,12 +444,23 @@ def format_schema_for_prompt(schema: Dict) -> str:
     return "\n".join(lines)
 
 
+
 def format_plan_for_prompt(plan: Dict) -> str:
     """Formats the query plan into a readable string."""
     
     lines = []
     
     lines.append(f"Intent: {plan.get('intent', 'select').upper()}")
+    
+    # NEW: Intent Type (5-type classification)
+    intent_type = plan.get("intent_type")
+    if intent_type:
+        lines.append(f"Intent Type: {intent_type}")
+    
+    # NEW: Optimization Strategy
+    optimization = plan.get("optimization_strategy")
+    if optimization:
+        lines.append(f"Optimization Strategy: {optimization}")
     
     tables = plan.get("tables_considered", [])
     if tables:
@@ -325,6 +497,7 @@ def format_plan_for_prompt(plan: Dict) -> str:
             lines.append(f"  {i}. {step}")
     
     return "\n".join(lines)
+
 
 
 def parse_llm_response(response: str) -> Dict:

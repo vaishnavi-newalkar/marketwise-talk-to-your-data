@@ -1,0 +1,11 @@
+{
+  "answer": "Error occurred.",
+  "error": "RateLimitError: Error code: 429 - {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01ke4mjhttf90sh2t9yf4wgx78` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99854, Requested 1885. Please try again in 25m2.495999999s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+  "reasoning_steps": [
+    {
+      "icon": "❌",
+      "text": "Error",
+      "status": "error"
+    }
+  ]
+}

@@ -30,6 +30,7 @@ def create_plan(question: str, schema: dict) -> dict:
     
     plan = {
         "intent": "select",
+        "intent_type": None,  # NEW: EXISTENTIAL, UNIVERSAL, SET_INTERSECTION, ABSENCE, AGGREGATION
         "complexity": "simple",
         "tables_considered": tables,
         "needs_join": len(tables) > 1,
@@ -43,8 +44,12 @@ def create_plan(question: str, schema: dict) -> dict:
         "negation": False,
         "intersection": False,
         "subquery_needed": False,
+        "optimization_strategy": None,  # NEW: Optimization approach
         "reasoning_summary": []
     }
+    
+    # STEP 1: Intent Classification (5 types)
+    plan = _classify_intent_type(q, plan)
     
     # Analyze query components
     plan = _detect_intent(q, plan)
@@ -56,6 +61,9 @@ def create_plan(question: str, schema: dict) -> dict:
     plan = _detect_distinct(q, plan)
     plan = _detect_negation(q, plan)
     plan = _detect_intersection(q, plan)
+    
+    # STEP 2: Determine Optimization Strategy
+    plan = _determine_optimization_strategy(plan)
     
     # Determine overall complexity
     plan["complexity"] = _calculate_complexity(plan)
@@ -436,3 +444,143 @@ def format_plan_for_display(plan: dict) -> str:
         lines.append("• Pattern: Intersection (multiple conditions)")
     
     return "\n".join(lines)
+
+
+def _classify_intent_type(question: str, plan: dict) -> dict:
+    """
+    STEP 1: Classify query intent into one of 5 types.
+    
+    Intent Types:
+    1. EXISTENTIAL - "has", "with", "containing", "ordered", "purchased" (at least once)
+    2. UNIVERSAL - "only", "every", "never", "all", "none" (every/no occurrence)
+    3. SET_INTERSECTION - "both", "and" (multiple conditions across categories)
+    4. ABSENCE - "never", "no", "without", "has not" (did NOT happen)
+    5. AGGREGATION - "most", "least", "top", "total", "average", "highest"
+    
+    Returns:
+        Updated plan with intent_type set
+    """
+    
+    q = question.lower()
+    
+    # Priority 1: AGGREGATION/RANKING
+    aggregation_patterns = [
+        r'\bmost\b', r'\bleast\b', r'\btop\b', r'\bbottom\b',
+        r'\bhighest\b', r'\blowest\b', r'\btotal\b', r'\baverage\b',
+        r'\bsum\b', r'\bcount\b', r'\bmax\b', r'\bmin\b',
+        r'\bhow many\b', r'\bnumber of\b'
+    ]
+    for pattern in aggregation_patterns:
+        if re.search(pattern, q):
+            plan["intent_type"] = "AGGREGATION"
+            plan["reasoning_summary"].append("Intent Type: AGGREGATION/RANKING")
+            return plan
+    
+    # Priority 2: SET_INTERSECTION (both X and Y)
+    intersection_patterns = [
+        r'\bboth\b.*?\band\b',
+        r'\band\b.*?\band\b',  # Multiple ANDs
+        r'\bfrom\s+\w+\s+and\s+\w+',  # "from X and Y"
+        r'\bpurchased\b.*?\band\b.*?\bgenre',
+        r'\bordered\b.*?\band\b.*?\bgenre'
+    ]
+    for pattern in intersection_patterns:
+        if re.search(pattern, q):
+            plan["intent_type"] = "SET_INTERSECTION"
+            plan["reasoning_summary"].append("Intent Type: SET_INTERSECTION (both/and conditions)")
+            return plan
+    
+    # Priority 3: UNIVERSAL (only, every, all)
+    universal_patterns = [
+        r'\bonly\b', r'\bevery\b', r'\ball\s+\w+\s+(are|have)',
+        r'\bexclusively\b', r'\bsolely\b'
+    ]
+    for pattern in universal_patterns:
+        if re.search(pattern, q):
+            plan["intent_type"] = "UNIVERSAL"
+            plan["reasoning_summary"].append("Intent Type: UNIVERSAL (only/every/all)")
+            return plan
+    
+    # Priority 4: ABSENCE (never, no, without)
+    absence_patterns = [
+        r'\bnever\b', r'\bno\s+\w+', r'\bwithout\b',
+        r'\bhas\s+not\b', r'\bhave\s+not\b', r'\bhasn\'t\b', r'\bhaven\'t\b',
+        r'\bno\s+purchase', r'\bno\s+order', r'\bnot\s+purchased',
+        r'\bdid\s+not\b'
+    ]
+    for pattern in absence_patterns:
+        if re.search(pattern, q):
+            plan["intent_type"] = "ABSENCE"
+            plan["reasoning_summary"].append("Intent Type: ABSENCE (never/without/no)")
+            return plan
+    
+    # Priority 5: EXISTENTIAL (has, with, containing - default for many queries)
+    existential_patterns = [
+        r'\bhas\b', r'\bwith\b', r'\bcontaining\b',
+        r'\bordered\b', r'\bpurchased\b', r'\bbought\b',
+        r'\bincluding\b', r'\bhaving\b'
+    ]
+    for pattern in existential_patterns:
+        if re.search(pattern, q):
+            plan["intent_type"] = "EXISTENTIAL"
+            plan["reasoning_summary"].append("Intent Type: EXISTENTIAL (has/with/at-least-once)")
+            return plan
+    
+    # Default: EXISTENTIAL (most SELECT queries are existence checks)
+    plan["intent_type"] = "EXISTENTIAL"
+    plan["reasoning_summary"].append("Intent Type: EXISTENTIAL (default)")
+    return plan
+
+
+def _determine_optimization_strategy(plan: dict) -> dict:
+    """
+    STEP 2: Determine the best SQL optimization strategy based on intent type.
+    
+    Optimization Strategies:
+    - EXISTENTIAL: Use EXISTS (fast, stops at first match)
+    - UNIVERSAL: Use NOT EXISTS with anti-join
+    - SET_INTERSECTION: Use GROUP BY + HAVING COUNT(DISTINCT)
+    - ABSENCE: Use LEFT JOIN + IS NULL or NOT EXISTS
+    - AGGREGATION: Use aggregate functions + LIMIT
+    
+    Returns:
+        Updated plan with optimization_strategy set
+    """
+    
+    intent_type = plan.get("intent_type")
+    
+    if intent_type == "EXISTENTIAL":
+        if plan.get("needs_join"):
+            plan["optimization_strategy"] = "Use EXISTS instead of JOIN when only checking existence"
+        else:
+            plan["optimization_strategy"] = "Simple SELECT with WHERE filter"
+        plan["reasoning_summary"].append("Optimization: Use EXISTS for existence checks")
+    
+    elif intent_type == "UNIVERSAL":
+        plan["optimization_strategy"] = "Use NOT EXISTS for universal negation (most efficient anti-join)"
+        plan["reasoning_summary"].append("Optimization: NOT EXISTS pattern for 'only/never' conditions")
+    
+    elif intent_type == "SET_INTERSECTION":
+        plan["optimization_strategy"] = "Use GROUP BY + HAVING COUNT(DISTINCT) for single-pass intersection"
+        plan["reasoning_summary"].append("Optimization: GROUP BY + HAVING for 'both X and Y'")
+    
+    elif intent_type == "ABSENCE":
+        plan["optimization_strategy"] = "Use NOT EXISTS or LEFT JOIN + IS NULL for absence check"
+        plan["reasoning_summary"].append("Optimization: NOT EXISTS or anti-join for 'never/without'")
+    
+    elif intent_type == "AGGREGATION":
+        if plan.get("sorting") and plan.get("limit"):
+            plan["optimization_strategy"] = "Use aggregate + ORDER BY + LIMIT (no DISTINCT RANK needed)"
+        else:
+            plan["optimization_strategy"] = "Use aggregate function with appropriate GROUP BY"
+        plan["reasoning_summary"].append("Optimization: Efficient aggregation with LIMIT")
+    
+    # Additional optimizations
+    if plan.get("distinct") and plan.get("grouping"):
+        plan["optimization_strategy"] += " | Avoid DISTINCT when GROUP BY achieves same result"
+    
+    if not plan.get("limit") and plan.get("sorting"):
+        plan["reasoning_summary"].append("Consider: Add LIMIT to cap results for ranking queries")
+    
+    return plan
+

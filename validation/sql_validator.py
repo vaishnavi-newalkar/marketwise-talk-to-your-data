@@ -198,27 +198,73 @@ def has_sql_comments(sql: str) -> bool:
     return False
 
 
+
 def validate_cte_structure(sql_lower: str) -> bool:
     """
     Validates that a WITH clause is properly structured.
+    
+    Valid CTE patterns:
+    - WITH cte_name AS (SELECT ...) SELECT ...
+    - WITH cte1 AS (...), cte2 AS (...) SELECT ...
+    - WITH RECURSIVE cte AS (...) SELECT ...
     """
-    # Basic check: WITH ... AS ... SELECT
+    # Must contain AS after WITH
     if "as" not in sql_lower:
         return False
     
-    # Must contain SELECT somewhere after WITH
+    # Must contain SELECT somewhere
     if "select" not in sql_lower:
         return False
     
-    # The final statement should be SELECT
-    # Find the last occurrence of common keywords
-    parts = re.split(r'\)\s*select\b', sql_lower)
-    if len(parts) < 2:
-        # Could be simpler CTE, check for just SELECT
-        if not re.search(r'\bselect\b', sql_lower):
-            return False
+    # Check for valid CTE pattern: WITH ... AS (...) SELECT
+    # The pattern should be: WITH [RECURSIVE] name AS (subquery) main_query
     
-    return True
+    # Find positions of key keywords
+    with_pos = sql_lower.find("with")
+    if with_pos == -1:
+        return False
+    
+    # Look for AS after WITH
+    as_pos = sql_lower.find("as", with_pos)
+    if as_pos == -1:
+        return False
+    
+    # Look for opening parenthesis after AS
+    paren_open = sql_lower.find("(", as_pos)
+    if paren_open == -1:
+        return False
+    
+    # Find the matching closing parenthesis
+    paren_count = 0
+    paren_close = -1
+    for i in range(paren_open, len(sql_lower)):
+        if sql_lower[i] == "(":
+            paren_count += 1
+        elif sql_lower[i] == ")":
+            paren_count -= 1
+            if paren_count == 0:
+                paren_close = i
+                break
+    
+    if paren_close == -1:
+        return False
+    
+    # After the closing paren, there should be either:
+    # 1. Another CTE: comma followed by identifier AS (...)
+    # 2. Final SELECT statement
+    remaining = sql_lower[paren_close + 1:].strip()
+    
+    # Check if there's a SELECT after the CTE(s)
+    if "select" in remaining:
+        return True
+    
+    # Check if there's another CTE (comma followed by more CTEs)
+    if remaining.startswith(","):
+        # Multiple CTEs - recursively check if valid
+        return "select" in sql_lower[paren_close:]
+    
+    return False
+
 
 
 def sanitize_identifiers(sql: str, allowed_tables: list, allowed_columns: list) -> Tuple[bool, str]:
