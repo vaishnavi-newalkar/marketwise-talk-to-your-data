@@ -242,35 +242,38 @@ def ask_question(req: QuestionRequest):
         if plan.get("aggregation"): reasoning_steps.append({"icon": "📈", "text": f"Aggregation: {plan['aggregation']}", "status": "complete"})
         reasoning_steps.append({"icon": "🎯", "text": f"Strategy: {plan['complexity'].upper()} query", "status": "complete"})
 
-        # ... [Generation] ...
+        # ... [Initial Generation] ...
         reasoning_steps.append({"icon": "⚙️", "text": "Generating SQL...", "status": "complete"})
         try:
             gen_res = generate_sql_with_reasoning(llm, plan, refined_schema, enriched_query)
+            sql = gen_res["sql"]
+            llm_reasoning = gen_res["reasoning"]
         except SQLGenerationError as e:
-            return {"answer": "Generation failed.", "error": str(e), "reasoning_steps": reasoning_steps}
-
-        sql = gen_res["sql"]
-        llm_reasoning = gen_res["reasoning"]
-
-        # ... [Validation] ...
-        reasoning_steps.append({"icon": "🔒", "text": "Validating safety...", "status": "complete"})
-        try:
-            validate_sql(sql)
-        except SQLValidationError as e:
-            return {"answer": "Validation failed.", "error": str(e), "reasoning_steps": reasoning_steps, "sql": sql}
-
-        # ... [Execution] ...
-        reasoning_steps.append({"icon": "🚀", "text": "Executing query...", "status": "complete"})
+            # Fallback to empty SQL to trigger the retry loop with a format error
+            sql = ""
+            llm_reasoning = f"Initial generation failed: {str(e)}"
+            reasoning_steps.append({"icon": "⚠️", "text": "Initial generation failed, will retry...", "status": "error"})
+        
+        # ... [Execution & Validation Loop] ...
+        reasoning_steps.append({"icon": "🚀", "text": "Starting execution loop...", "status": "complete"})
         corrector = QueryCorrector(session.full_schema)
         attempts = []
         exec_result = None
         current_sql = sql
+
         
         for attempt in range(MAX_RETRIES + 1):
             try:
+                # 1. Validate safety
+                reasoning_steps.append({"icon": "🔒", "text": f"Validating safety (Attempt {attempt+1})...", "status": "complete"})
+                validate_sql(current_sql)
+                
+                # 2. Execute query
+                reasoning_steps.append({"icon": "🚀", "text": "Executing query...", "status": "complete"})
                 exec_result = execute_sql(session.db_path, current_sql)
                 break
-            except SQLExecutionError as e:
+                
+            except (SQLValidationError, SQLExecutionError) as e:
                 error_msg = str(e)
                 attempts.append({"sql": current_sql, "error": error_msg})
                 
@@ -333,10 +336,10 @@ def ask_question(req: QuestionRequest):
                 else:
                     # Max retries exceeded
                     return {
-                        "answer": "I encountered errors executing the query after multiple attempts.", 
+                        "answer": "I encountered safety validation or execution errors after multiple attempts.", 
                         "error": error_msg, 
                         "reasoning_steps": reasoning_steps, 
-                        "sql": sql,
+                        "sql": current_sql,
                         "attempts": attempts
                     }
 

@@ -44,6 +44,21 @@ def refine_schema(
     else:
         table_scores.sort(key=lambda x: x[1], reverse=True)
         seed_tables = [t for t, _ in table_scores[:top_k]]
+    
+    # NEW: Transactional awareness
+    transactional_keywords = {"top", "most", "highest", "lowest", "sale", "sales", "order", "purchase", "revenue", "spending"}
+    if any(k in keywords for k in transactional_keywords):
+        # Look for tables that likely contain transactional data but weren't picked
+        transactional_tables = {"orders", "order_details", "invoices", "invoice_items", "sales", "transactions", "order details"}
+        for table in full_schema.keys():
+            if table.lower() in transactional_tables and table not in seed_tables:
+                seed_tables.append(table)
+                # If we add a transactional table, also ensure products/customers are considered
+                for t in ["products", "customers", "items"]:
+                    if t in full_schema and t not in seed_tables:
+                        seed_tables.append(t)
+                break
+
 
     # Expand via foreign keys
     fk_graph = FKGraph(full_schema)

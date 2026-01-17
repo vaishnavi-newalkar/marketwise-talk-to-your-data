@@ -535,16 +535,24 @@ def parse_llm_response(response: str) -> Dict:
             if reasoning_match:
                 reasoning = reasoning_match.group(1).strip()
         
-        sql_match = re.search(sql_pattern, response, re.DOTALL)
+        sql_match = re.search(sql_pattern, response, re.DOTALL | re.MULTILINE)
         if sql_match:
             sql = sql_match.group(1).strip()
-            break
+            # If we matched a block, check if it's actually SQL (contains SELECT/WITH at start)
+            keywords = ['SELECT', 'WITH', 'PRAGMA', 'EXPLAIN']
+            if any(k in sql.upper() for k in keywords):
+                break
+            else:
+                # Reset if it looks like prose
+                sql = ""
+
     
     # Final fallback: look for SELECT/WITH
     if not sql:
-        # Try to find SQL starting with SELECT or WITH
+        # Try to find SQL starting with SELECT or WITH at the BEGINNING of a line
+        # This prevents matching "with" inside sentences
         sql_match = re.search(
-            r'(?i)((?:WITH|SELECT)\s+.+?)(?:$|\n\n)',
+            r'(?im)^\s*((?:WITH|SELECT)\s+.+?)(?:$|(?:\n\s*\n))',
             response,
             re.DOTALL
         )
@@ -557,10 +565,15 @@ def parse_llm_response(response: str) -> Dict:
                 reasoning = response[:sql_start].strip()
                 # Clean up reasoning
                 reasoning = re.sub(r'^(?:REASONING:?|SQL:?)\s*', '', reasoning, flags=re.IGNORECASE)
+
     
     # Clean the SQL
     sql = clean_sql(sql)
     
+    # Check for placeholder messages that aren't real SQL
+    if len(sql.split()) < 5 and not any(k in sql.upper() for k in ["SELECT", "WITH", "PRAGMA"]):
+        sql = ""
+
     if not sql:
         raise SQLGenerationError(
             "Failed to extract SQL from LLM response. "
@@ -574,6 +587,8 @@ def parse_llm_response(response: str) -> Dict:
         "sql": sql,
         "reasoning": reasoning
     }
+
+
 
 
 def clean_sql(sql: str) -> str:
@@ -593,34 +608,117 @@ def clean_sql(sql: str) -> str:
     # Remove block comments
     sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
     
-    # Find start
-    match = re.search(r'(?i)\b((?:WITH|SELECT)\s+.+)', sql, re.DOTALL)
+    # Find start - anchor to start of string or start of line
+    # Must be followed by a space and then some typical SQL-starting characters
+    # If it starts with "SELECT that ..." or "WITH the ...", it's likely prose
+    prose_starts = [
+        r"(?i)\bSELECT\s+(?:that|returns|is|for|to|specifically|only|just)\b",
+        r"(?i)\bWITH\s+(?:the|this|all|these|regard|respect)\b",
+    ]
+    
+    # Check if the FIRST match is actually prose
+    first_word_match = re.search(r'(?i)^\s*(\w+)\b', sql)
+    if first_word_match:
+        first_word = first_word_match.group(1).upper()
+        if first_word in ["SELECT", "WITH", "PRAGMA", "EXPLAIN"]:
+            is_prose = False
+            for p_pattern in prose_starts:
+                if re.search(p_pattern, sql[:100]):
+                    is_prose = True
+                    break
+            
+            if is_prose:
+                # It's likely a sentence starting with "Select..."
+                # Find a LATER occurrence of "SQL:" or a backtick block
+                sql_marker_match = re.search(r'(?i)SQL:\s*(.+)', sql, re.DOTALL)
+                if sql_marker_match:
+                    sql = sql_marker_match.group(1)
+                else:
+                    # Or find a line that is CLEARLY SQL (WITH name AS or SELECT col)
+                    lines = sql.split('\n')
+                    for i, line in enumerate(lines):
+                        if i > 0 and (re.search(r'^\s*SELECT\s+', line, re.IGNORECASE) or 
+                                      re.search(r'^\s*WITH\s+\w+\s+AS\s*\(', line, re.IGNORECASE)):
+                            sql = "\n".join(lines[i:])
+                            break
+
+    # Anchor to start of line for keywords
+    # WITH must be followed by name AS (
+    match = re.search(r'(?im)^\s*(SELECT\s+.+|WITH\s+\w+\s+AS\s*\(.+|PRAGMA\s+.+|EXPLAIN\s+.+)', sql, re.DOTALL)
     if match:
         sql = match.group(1)
+    else:
+        # Fallback for mid-string start
+        # SELECT is safer than WITH for mid-string
+        match = re.search(r'(?i)\b(SELECT\s+[a-zA-Z0-9_"`\'\[(*].+)', sql, re.DOTALL)
+        if match:
+             candidate = match.group(1)
+             common_prose_words = {"that", "returns", "the", "a", "is", "for", "to", "this", "it", "was", "will", "would"}
+             words_in_start = set(candidate.lower().split()[:10])
+             if not (words_in_start & common_prose_words):
+                 sql = candidate
+        else:
+             # Last ditch for WITH
+             match = re.search(r'(?i)\b(WITH\s+\w+\s+AS\s*\(.+)', sql, re.DOTALL)
+             if match:
+                 sql = match.group(1)
+
+
+
     
-    # 1. Truncate at first semicolon
+    # 1. Handle semicolons: only truncate if followed by prose
+    # If a semicolon is followed by a SELECT, it's likely a malformed single statement
     if ";" in sql:
-        sql = sql.split(";")[0]
+        parts = sql.split(";")
+        if len(parts) > 1:
+            # If the next part starts with SELECT/WITH, it's likely a malformed single statement
+            # We'll just remove the semicolon and keep going
+            next_part = parts[1].strip().lower()
+            if next_part.startswith(("select", "with")):
+                sql = " ".join(parts)
+            else:
+                # Otherwise truncate
+                sql = parts[0]
+
         
-    # 2. Truncate at common prose indicators (if no semicolon was found or prose followed)
-    # Detects: "Given...", "Note:...", "The query...", "Explanation..."
+    # 2. Truncate at common prose indicators (only if they appear after the possible SQL start)
     prose_indicators = [
         r'\n\s*Given\b',
         r'\n\s*Note\b',
         r'\n\s*Explanation\b',
         r'\n\s*The query\b',
         r'\n\s*This query\b',
-        r'\n\s*Here\b'
+        r'\n\s*Here\b',
+        r'\n\s*In this\b',
+        r'\n\s*I have\b',
+        r'\n\s*Please\b'
     ]
     for indicator in prose_indicators:
         parts = re.split(indicator, sql, flags=re.IGNORECASE)
         if len(parts) > 1:
             sql = parts[0]
     
+    # Final check: if it contains "SQL:" mid-string, it might be the separator we missed
+    if "SQL:" in sql:
+        parts = sql.split("SQL:")
+        if len(parts) > 1 and ("SELECT" in parts[1].upper() or "WITH" in parts[1].upper()):
+            sql = parts[1]
+
+    # Heuristic: if it's very long and contains " because " or " is " or other common prose, 
+    # and doesn't have enough SQL keywords, it's probably still prose.
+    if len(sql.split()) > 30:
+        sql_keywords = {"SELECT", "FROM", "WHERE", "JOIN", "GROUP", "ORDER", "LIMIT", "WITH", "AS"}
+        words_upper = set(sql.upper().split())
+        if len(words_upper & sql_keywords) < 3:
+             # Too many words, too few keywords -> likely prose
+             return ""
+
     # Clean up whitespace
     sql = " ".join(sql.split())
     
     return sql.strip()
+
+
 
 
 # Backward compatibility

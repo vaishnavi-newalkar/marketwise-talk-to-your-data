@@ -31,6 +31,13 @@ class QueryCorrector:
         r"datatype mismatch": "type_mismatch",
         r"SELECTExpected": "syntax_error",
         r"no such function": "function_not_found",
+        r"Invalid CTE": "cte_error",
+        r"Forbidden SQL operation": "security_violation",
+        r"Only SELECT": "security_violation",
+        r"Empty SQL": "extraction_error",
+        r"Failed to extract SQL": "extraction_error",
+
+
     }
     
     def __init__(self, schema: Dict):
@@ -180,7 +187,33 @@ class QueryCorrector:
                 "fix_hint": "Adjusting data types in the query."
             }
         
+        elif error_type == "cte_error":
+            return {
+                "error_type": error_type,
+                "suggestion": "The WITH clause (CTE) structure is invalid.",
+                "can_retry": True,
+                "fix_hint": "Ensure your WITH clause is followed by a main SELECT statement that uses the CTE. Format: WITH name AS (SELECT ...) SELECT * FROM name"
+            }
+        
+        elif error_type == "security_violation":
+            return {
+                "error_type": error_type,
+                "suggestion": "The query contains forbidden keywords or patterns.",
+                "can_retry": True,
+                "fix_hint": "Generate a READ-ONLY SELECT query. Do not use comments or forbidden keywords like DROP, UPDATE, etc."
+            }
+        
+        elif error_type == "extraction_error":
+            return {
+                "error_type": error_type,
+                "suggestion": "I could not find a valid SQL query in your response.",
+                "can_retry": True,
+                "fix_hint": "Please provide the SQL query clearly AFTER the 'SQL:' label. Do not wrap the SQL in extra prose. Format: SQL: SELECT ... "
+            }
+        
         return {
+
+
             "error_type": error_type,
             "suggestion": "Query error occurred.",
             "can_retry": False,

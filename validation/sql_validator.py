@@ -208,26 +208,29 @@ def validate_cte_structure(sql_lower: str) -> bool:
     - WITH cte1 AS (...), cte2 AS (...) SELECT ...
     - WITH RECURSIVE cte AS (...) SELECT ...
     """
-    # Must contain AS after WITH
-    if "as" not in sql_lower:
+    # Must contain AS after WITH (as a whole word)
+    if not re.search(r'\bas\b', sql_lower):
         return False
     
-    # Must contain SELECT somewhere
-    if "select" not in sql_lower:
+    # Must contain SELECT somewhere (as a whole word)
+    if not re.search(r'\bselect\b', sql_lower):
         return False
     
     # Check for valid CTE pattern: WITH ... AS (...) SELECT
     # The pattern should be: WITH [RECURSIVE] name AS (subquery) main_query
     
     # Find positions of key keywords
-    with_pos = sql_lower.find("with")
-    if with_pos == -1:
+    with_match = re.search(r'\bwith\b', sql_lower)
+    if not with_match:
         return False
+    with_pos = with_match.start()
     
-    # Look for AS after WITH
-    as_pos = sql_lower.find("as", with_pos)
-    if as_pos == -1:
+    # Look for AS after WITH (must be a word)
+    as_match = re.search(r'\bas\b', sql_lower[with_pos:])
+    if not as_match:
         return False
+    as_pos = with_pos + as_match.start()
+
     
     # Look for opening parenthesis after AS
     paren_open = sql_lower.find("(", as_pos)
@@ -255,13 +258,14 @@ def validate_cte_structure(sql_lower: str) -> bool:
     remaining = sql_lower[paren_close + 1:].strip()
     
     # Check if there's a SELECT after the CTE(s)
-    if "select" in remaining:
+    if re.search(r'\bselect\b', remaining):
         return True
     
     # Check if there's another CTE (comma followed by more CTEs)
     if remaining.startswith(","):
-        # Multiple CTEs - recursively check if valid
-        return "select" in sql_lower[paren_close:]
+        # Multiple CTEs - check if there's a SELECT after the last one
+        return bool(re.search(r'\bselect\b', sql_lower[paren_close:]))
+
     
     return False
 
