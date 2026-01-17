@@ -24,7 +24,7 @@ API_URL = "http://127.0.0.1:8000"
 CHAT_HISTORY_FILE = "chat_history.json"
 
 st.set_page_config(
-    page_title="SQL Assistant",
+    page_title="Query Potter",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -523,7 +523,7 @@ def main():
                 st.info("Schema not available")
 
     # Main Area
-    st.markdown("<h1 class='main-title'>🧠 SQL Assistant</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 class='main-title'>🧠 Query Potter</h1>", unsafe_allow_html=True)
     
     current_chat = get_current_chat()
     if not current_chat or not current_chat.get("session_id"):
